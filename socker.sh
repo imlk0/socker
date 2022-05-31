@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
-set -o errexit    # Used to exit upon error, avoiding cascading errors
-set -o pipefail   # Unveils hidden failures
-set -o nounset    # Exposes unset variables
+set -o errexit  # Used to exit upon error, avoiding cascading errors
+set -o pipefail # Unveils hidden failures
+set -o nounset  # Exposes unset variables
 
 CONTAINERS_BASE_DIR=/var/lib/socker/containers
 
@@ -16,7 +16,7 @@ parse_args_create() {
     while true; do
         [[ $# -ne 0 ]] || break
         case $1 in
-        --rootfs=*) 
+        --rootfs=*)
             arg_rootfs="${1:9}"
             shift
             ;;
@@ -38,12 +38,12 @@ parse_args_create() {
     # TODO: check for essential arguments
 }
 
-gen_random_id(){
+gen_random_id() {
     # TODO: real random id
     echo "random_id"
 }
 
-do_create(){
+do_create() {
     local container_id="$(gen_random_id)"
     local container_dir="$CONTAINERS_BASE_DIR/$container_id"
     mkdir -p "$container_dir"
@@ -55,21 +55,93 @@ do_create(){
         mkdir -p "$container_dir/rootfs"
         tar -xf "$arg_rootfs" --directory="$container_dir/rootfs"
     else
-        error "bad rootfs" ; exit 1
+        error "bad rootfs"; exit 1
     fi
 
-    echo "$arg_cmd" > "$container_dir/cmdline"
-    echo "created" > "$container_dir/status"
+    echo "$arg_cmd" >"$container_dir/cmdline"
+    echo "Created" >"$container_dir/status"
+    touch "$container_dir/lock"
+
+    echo "$container_id"
 }
 
 do_ls() {
     echo -e "CONTAINER ID\tSTATUS\tCOMMAND"
-    for container_id in `ls "$CONTAINERS_BASE_DIR"`; do
+    for container_id in $(ls "$CONTAINERS_BASE_DIR"); do
         echo -e "$container_id\t$(cat $CONTAINERS_BASE_DIR/$container_id/status)\t$(cat $CONTAINERS_BASE_DIR/$container_id/cmdline)"
     done
 }
 
 parse_args_exec() {
+}
+
+lock_container() {
+    # open "lock" file with fd 100
+    exec 100<"$CONTAINERS_BASE_DIR/$1/lock"
+    flock -x -n --timeout 1 100
+}
+
+unlock_container() {
+    flock -u 100
+    exec 100<&-
+}
+
+parse_args_start() {
+    container_id=$1
+}
+
+do_start() {
+    # Check status of this container
+    [[ -d "$CONTAINERS_BASE_DIR/$container_id" ]] || { error "Container $container_id does not exist"; exit 1; }
+
+    if [[ $(cat "$CONTAINERS_BASE_DIR/$container_id/status") == "Running" ]]; then
+        error "Container $container_id is already running"
+        exit 1
+    fi
+
+    (
+        # nohup
+        trap "" HUP
+
+        subshell_pid=$(exec sh -c 'echo "$PPID"')
+        # Change short name of this subshell process
+        echo -n "socker-shim" > /proc/$subshell_pid/comm
+        # Close all fd except {0,1,2}
+        for fd in $(ls /proc/$subshell_pid/fd); do
+            if [[ $fd -gt 2 ]]; then
+                eval "exec $fd>&-"
+            fi
+        done
+        # Close stdin
+        exec 0>&-
+
+        # Update status of container to Running
+        lock_container "$container_id" || { error "Failed to lock container $container_id. exit now"; exit 1; }
+        # We need to check again
+        if [[ $(cat "$CONTAINERS_BASE_DIR/$container_id/status") == "Running" ]]; then
+            error "Container $container_id is already running"
+            exit 1
+        fi
+        echo "Running" >"$CONTAINERS_BASE_DIR/$container_id/status"
+        unlock_container
+
+        # TODO: should we persistent namespace in file? (by unshare --pid=<path of file>)
+        # Run container with unshare in a empty environment
+        env -i \
+            unshare --pid --user --mount --net \
+            --fork --kill-child \
+            --root="$CONTAINERS_BASE_DIR/$container_id/rootfs" \
+            --mount-proc $(cat $CONTAINERS_BASE_DIR/$container_id/cmdline) || { local exit_status=$?; true; }
+
+        # Update status of container to exited
+        lock_container "$container_id" || { error "Failed to lock container $container_id. exit now"; exit 1; }
+            echo "Exited ($exit_status)" >"$CONTAINERS_BASE_DIR/$container_id/status"
+        unlock_container
+
+    # Replace stdout and stderr with anonymous pipe. This may looks dirty but, safer. :)
+    ) 1> >(cat >>"$CONTAINERS_BASE_DIR/$container_id/stdout") \
+    2> >(cat >>"$CONTAINERS_BASE_DIR/$container_id/stderr") &
+    echo $container_id
 }
 
 error_arg() {
@@ -90,7 +162,6 @@ warning() {
     echo -e "[warning] $1"
 }
 
-
 usage() {
     echo "Run cmd in a isolation network namespace."
     echo ""
@@ -103,7 +174,6 @@ usage() {
     echo "      start                             Start a container"
     echo "      ls                                List all containers"
 }
-
 
 # TODO: should we be root? consider an uid namespace
 # if [[ ${EUID} -ne 0 ]]; then
