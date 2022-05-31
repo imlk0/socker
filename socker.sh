@@ -4,6 +4,8 @@ set -o errexit    # Used to exit upon error, avoiding cascading errors
 set -o pipefail   # Unveils hidden failures
 set -o nounset    # Exposes unset variables
 
+CONTAINERS_BASE_DIR=/var/lib/socker/containers
+
 do_install() {
     script_path=$(realpath $0)
     echo "install -m 755 ${script_path} /usr/local/bin/socker"
@@ -36,14 +38,14 @@ parse_args_create() {
     # TODO: check for essential arguments
 }
 
-gen_random_name(){
-    # TODO: real random name
-    echo "random_name"
+gen_random_id(){
+    # TODO: real random id
+    echo "random_id"
 }
 
 do_create(){
-    local container_name="$(gen_random_name)"
-    local container_dir="/var/lib/socker/containers/$container_name"
+    local container_id="$(gen_random_id)"
+    local container_dir="$CONTAINERS_BASE_DIR/$container_id"
     mkdir -p "$container_dir"
 
     # If --rootfs is pointed to a dir, just use it.
@@ -60,8 +62,14 @@ do_create(){
     echo "created" > "$container_dir/status"
 }
 
+do_ls() {
+    echo -e "CONTAINER ID\tSTATUS\tCOMMAND"
+    for container_id in `ls "$CONTAINERS_BASE_DIR"`; do
+        echo -e "$container_id\t$(cat $CONTAINERS_BASE_DIR/$container_id/status)\t$(cat $CONTAINERS_BASE_DIR/$container_id/cmdline)"
+    done
+}
+
 parse_args_exec() {
-    
 }
 
 error_arg() {
@@ -122,8 +130,6 @@ create)
     exit 0
     ;;
 ls)
-    shift
-    parse_args_ls "$@"
     do_ls
     exit 0
     ;;
