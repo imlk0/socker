@@ -140,9 +140,7 @@ do_start() {
                 exec chroot $CONTAINERS_BASE_DIR/$container_id/rootfs $(cat $CONTAINERS_BASE_DIR/$container_id/cmdline)" || { local exit_status=$?; true; }
 
         # Update status of container to exited
-        lock_container "$container_id" || { error "Failed to lock container $container_id. exit now"; exit 1; }
-            echo "Exited ($exit_status)" >"$CONTAINERS_BASE_DIR/$container_id/status"
-        unlock_container
+        echo "Exited ($exit_status)" >"$CONTAINERS_BASE_DIR/$container_id/status"
 
     # Replace stdout and stderr with anonymous pipe. This may looks dirty but, safer. :)
     ) 1> >(cat >>"$CONTAINERS_BASE_DIR/$container_id/stdout") \
