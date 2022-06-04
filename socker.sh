@@ -133,7 +133,8 @@ do_start() {
             unshare --pid --user --mount --net \
             --fork --kill-child \
             --map-user=0 --map-group=0 \
-            /bin/sh -c "read -d ' ' PID </proc/self/stat ; \
+            /bin/sh -c "set -o errexit; \
+                read -d ' ' PID </proc/self/stat ; \
                 echo \$PID > $CONTAINERS_BASE_DIR/$container_id/pid ; \
                 mount -t proc proc $CONTAINERS_BASE_DIR/$container_id/rootfs/proc ; \
                 exec chroot $CONTAINERS_BASE_DIR/$container_id/rootfs $(cat $CONTAINERS_BASE_DIR/$container_id/cmdline)" || { local exit_status=$?; true; }
@@ -312,7 +313,7 @@ rm)
     exit 0
     ;;
 *)
-    error_arg
+    error_arg $1
     exit 1
     ;;
 esac
