@@ -72,9 +72,6 @@ do_ls() {
     done
 }
 
-parse_args_exec() {
-}
-
 lock_container() {
     # open "lock" file with fd 100
     exec 100<"$CONTAINERS_BASE_DIR/$1/lock"
@@ -87,10 +84,11 @@ unlock_container() {
 }
 
 parse_args_start() {
-    container_id=$1
+    arg_container_id=$1
 }
 
 do_start() {
+    container_id="$arg_container_id"
     # Check status of this container
     [[ -d "$CONTAINERS_BASE_DIR/$container_id" ]] || { error "Container $container_id does not exist"; exit 1; }
 
@@ -150,6 +148,36 @@ do_start() {
     ) 1> >(cat >>"$CONTAINERS_BASE_DIR/$container_id/stdout") \
     2> >(cat >>"$CONTAINERS_BASE_DIR/$container_id/stderr") &
     echo $container_id
+}
+
+parse_args_stop() {
+    arg_time=10
+    while [[ $# -ne 0 && "$1" =~ ^- ]]; do case $1 in
+    -t | --time)
+        shift; arg_time=$1
+        ;;
+    -*)
+        error_arg $1
+        exit 1
+        ;;
+    esac; shift; done
+
+    [[ $# -ne 0 ]] || { error "container_id not provided"; exit 1; }
+    arg_container_id="$1"
+}
+
+do_stop() {
+    container_id="$arg_container_id"
+
+    if [[ -d "$CONTAINERS_BASE_DIR/$container_id" && $(cat "$CONTAINERS_BASE_DIR/$container_id/status") == "Running" ]]; then
+        read pid <"$CONTAINERS_BASE_DIR/$container_id/pid"
+        kill -TERM "$pid"
+        if [[ -d "/proc/$pid" ]]; then
+            sleep "$arg_time"
+            kill -KILL "$pid"
+        fi
+    fi
+    echo "$container_id"
 }
 
 error_arg() {
@@ -218,11 +246,13 @@ start)
     exit 0
     ;;
 exec)
+    shift
     parse_args_exec "$@"
     do_exec
     exit 0
     ;;
 stop)
+    shift
     parse_args_stop "$@"
     do_stop
     exit 0
