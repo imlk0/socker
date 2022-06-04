@@ -64,7 +64,7 @@ do_create() {
     echo "$container_id"
 }
 
-do_ls() {
+do_ps() {
     echo -e "CONTAINER ID\tSTATUS\tCOMMAND"
     for container_id in $(ls "$CONTAINERS_BASE_DIR"); do
         echo -e "$container_id\t$(cat $CONTAINERS_BASE_DIR/$container_id/status)\t$(cat $CONTAINERS_BASE_DIR/$container_id/cmdline)"
@@ -256,7 +256,7 @@ usage() {
     echo "      install                           Copy this script to /usr/local/bin/socker"
     echo "      create                            Create a container"
     echo "      start                             Start a container"
-    echo "      ls                                List all containers"
+    echo "      ps                                List all containers"
 }
 
 # TODO: should we be root? consider an uid namespace
@@ -283,8 +283,8 @@ create)
     do_create
     exit 0
     ;;
-ls)
-    do_ls
+ps)
+    do_ps
     exit 0
     ;;
 start)
