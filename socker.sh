@@ -125,6 +125,7 @@ do_start() {
         echo "Running" >"$CONTAINERS_BASE_DIR/$container_id/status"
         unlock_container
 
+        local exit_status=0
         # TODO: should we persistent namespace in file? (by unshare --pid=<path of file>)
         # Run container with unshare in a empty environment
         env -i \
