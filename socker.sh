@@ -99,6 +99,9 @@ do_start() {
         exit 1
     fi
 
+    # This subshell process (named as 'socker-shim') shall run as long as the container run
+    #   socker-shim─┬─2*[bash───cat]
+    #                └─unshare───<container pid 1>
     (
         # nohup
         trap "" HUP
@@ -128,12 +131,15 @@ do_start() {
         local exit_status=0
         # TODO: should we persistent namespace in file? (by unshare --pid=<path of file>)
         # Run container with unshare in a empty environment
+        # Note: It is necessary to use --fork since we are creating a new pid_namespace
         env -i \
             unshare --pid --user --mount --net \
             --fork --kill-child \
-            --root="$CONTAINERS_BASE_DIR/$container_id/rootfs" \
             --map-user=0 --map-group=0 \
-            --mount-proc $(cat $CONTAINERS_BASE_DIR/$container_id/cmdline) || { local exit_status=$?; true; }
+            /bin/sh -c "read -d ' ' PID </proc/self/stat ; \
+                echo \$PID > $CONTAINERS_BASE_DIR/$container_id/pid ; \
+                mount -t proc proc $CONTAINERS_BASE_DIR/$container_id/rootfs/proc ; \
+                exec chroot $CONTAINERS_BASE_DIR/$container_id/rootfs $(cat $CONTAINERS_BASE_DIR/$container_id/cmdline)" || { local exit_status=$?; true; }
 
         # Update status of container to exited
         lock_container "$container_id" || { error "Failed to lock container $container_id. exit now"; exit 1; }
