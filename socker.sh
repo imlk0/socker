@@ -132,6 +132,7 @@ do_start() {
             unshare --pid --user --mount --net \
             --fork --kill-child \
             --root="$CONTAINERS_BASE_DIR/$container_id/rootfs" \
+            --map-user=0 --map-group=0 \
             --mount-proc $(cat $CONTAINERS_BASE_DIR/$container_id/cmdline) || { local exit_status=$?; true; }
 
         # Update status of container to exited
