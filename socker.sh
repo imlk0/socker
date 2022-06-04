@@ -39,8 +39,7 @@ parse_args_create() {
 }
 
 gen_random_id() {
-    # TODO: real random id
-    echo "random_id"
+    head -c6 /dev/urandom | hexdump '-e"%x"'
 }
 
 do_create() {
