@@ -150,6 +150,43 @@ do_start() {
     echo $container_id
 }
 
+parse_args_exec() {
+    arg_interactive=0
+    arg_tty=0
+
+    while [[ $# -ne 0 && "$1" =~ ^- && ! "$1" == "--" ]]; do case $1 in
+    -i | --interactive)
+        arg_interactive=1
+        ;;
+    -t | --tty)
+        arg_tty=1
+        ;;
+    -*)
+        error_arg $1
+        exit 1
+        ;;
+    esac; shift; done
+    if [[ $# -ne 0 && "$1" == '--' ]]; then shift; fi
+
+    [[ $# -ne 0 ]] || { error "container_id not provided"; exit 1; }
+    arg_container_id="$1"
+    shift
+
+    [[ $# -ne 0 ]] || { error "cmdline not provided"; exit 1; }
+    arg_cmdline="$@"
+}
+
+do_exec() {
+    container_id="$arg_container_id"
+    
+    [[ -d "$CONTAINERS_BASE_DIR/$container_id" ]] || { error "Container $container_id does not exist"; exit 1; }
+    [[ $(cat "$CONTAINERS_BASE_DIR/$container_id/status") == "Running" ]] || { error "Container $container_id is not running"; exit 1; }
+
+    read pid <"$CONTAINERS_BASE_DIR/$container_id/pid"
+    env -i nsenter --all --target "$pid" --root --wdns=/ $arg_cmdline
+    # TODO: check `arg_interactive` and `arg_tty`
+}
+
 parse_args_stop() {
     arg_time=10
     while [[ $# -ne 0 && "$1" =~ ^- ]]; do case $1 in
