@@ -215,6 +215,20 @@ do_stop() {
     echo "$container_id"
 }
 
+parse_args_rm() {
+    [[ $# -ne 0 ]] || { error "container_id not provided"; exit 1; }
+    arg_container_id="$1"
+}
+
+do_rm() {
+    container_id="$arg_container_id"
+
+    [[ -d "$CONTAINERS_BASE_DIR/$container_id" ]] || { error "Container $container_id does not exist"; exit 1; }
+    [[ $(cat "$CONTAINERS_BASE_DIR/$container_id/status") != "Running" ]] || { error "Container $container_id is running. You need to stop it before remove."; exit 1; }
+    rm -rf $CONTAINERS_BASE_DIR/$container_id
+    echo "$container_id"
+}
+
 error_arg() {
     error "Unexpected argument: $1"
     echo ""
@@ -293,6 +307,8 @@ stop)
     exit 0
     ;;
 rm)
+    shift
+    parse_args_rm "$@"
     do_rm
     exit 0
     ;;
