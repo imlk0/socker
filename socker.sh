@@ -113,8 +113,8 @@ do_start() {
                 eval "exec $fd>&-"
             fi
         done
-        # Close stdin
-        exec 0>&-
+        # Redirect stdin to null
+        exec </dev/null
 
         # Update status of container to Running
         lock_container "$container_id" || { error "Failed to lock container $container_id. exit now"; exit 1; }
