@@ -10,6 +10,12 @@ do_install() {
     script_path=$(realpath $0)
     echo "install -m 755 ${script_path} /usr/local/bin/socker"
     install -m 755 ${script_path} /usr/local/bin/socker
+
+    # create default vbridge
+    if [[ $(brctl show | grep "vbridge_default") == "" ]]; then
+        brctl addbr vbridge_default
+        ip link set vbridge_default up
+    fi
 }
 
 parse_args_create() {
@@ -64,6 +70,18 @@ do_create() {
     echo "$container_id"
 }
 
+parse_args_ip() {
+    [[ $# -ge 2 ]] || { error "args not provided"; exit 1; }
+    ip_arg_container_id=$1
+    ip_arg_addr=$2
+}
+
+# $1: container_id, $2: ip addr & mask, eg. 10.3.8.211/24
+do_ip_add() {
+    container_id=${ip_arg_container_id:0:8}
+    ip -n "$container_id" addr add "$ip_arg_addr" dev "v$container_id"
+}
+
 do_ps() {
     echo -e "CONTAINER ID\tSTATUS\tCOMMAND"
     for container_id in $(ls "$CONTAINERS_BASE_DIR"); do
@@ -88,6 +106,7 @@ parse_args_start() {
 
 do_start() {
     container_id="$arg_container_id"
+    n_container_id=${container_id:0:8}
     # Check status of this container
     [[ -d "$CONTAINERS_BASE_DIR/$container_id" ]] || { error "Container $container_id does not exist"; exit 1; }
 
@@ -147,22 +166,37 @@ do_start() {
             exit $shim_status
         fi
 
+        if [[ $(ls /sys/class/net | grep "v$n_container_id") != "" ]]; then
+            ip link delete v$n_container_id
+        fi
+
+        if [[ $(ls /sys/class/net | grep "b$n_container_id") != "" ]]; then
+            ip link delete b$n_container_id
+        fi
+
+        ip link add v$n_container_id type veth peer name b$n_container_id
+        brctl addif vbridge_default b$n_container_id
+        ip link set b$n_container_id up
+
         local container_exit_status=0
         # TODO: limit the capabilities of the init process
         # TODO: check cmdline for shell script escaping errors
         # Run container with unshare in a empty environment
         # Note: It is necessary to use --fork since we are creating a new pid_namespace
         env -i \
-            unshare --pid --user --mount --net \
+            unshare --pid --user --mount \
             --fork --kill-child \
             --map-user=0 --map-group=0 \
-            /bin/sh -c "set -o errexit ;\
+            /bin/sh -c "set -o errexit ; \
                 exec 5<&- 4>&- ; \
                 read PID _ </proc/self/stat ; \
                 echo \$PID > $CONTAINERS_BASE_DIR/$container_id/pid ; \
                 echo 'pid ready' >&6 ; \
+                ip netns add $n_container_id ; \
+                ip link set v$n_container_id netns $n_container_id ; \
+                ip -n $n_container_id link set v$n_container_id up ; \
                 echo 1 > $cgroup_dir/cgroup.procs ; \
-                exec unshare --cgroup /bin/sh -c ' \
+                exec nsenter --net=/var/run/netns/$n_container_id unshare --cgroup /bin/sh -c ' \
                     set -o errexit ; \
                     mount -t proc proc $CONTAINERS_BASE_DIR/$container_id/rootfs/proc ; \
                     mount -t sysfs -o ro sys $CONTAINERS_BASE_DIR/$container_id/rootfs/sys ; \
