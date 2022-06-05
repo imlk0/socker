@@ -140,7 +140,7 @@ do_start() {
             --fork --kill-child \
             --map-user=0 --map-group=0 \
             /bin/sh -c "set -o errexit ; \
-                read -d ' ' PID </proc/self/stat ; \
+                read PID _ </proc/self/stat ; \
                 echo \$PID > $CONTAINERS_BASE_DIR/$container_id/pid ; \
                 echo 1 > $cgroup_dir/cgroup.procs ; \
                 exec unshare --cgroup /bin/sh -c ' \
