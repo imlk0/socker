@@ -115,6 +115,10 @@ do_start() {
         # Redirect stdin to null
         exec </dev/null
 
+        # Create a cgroup for init process
+        local cgroup_dir="/sys/fs/cgroup/socker-$container_id"
+        mkdir -p $cgroup_dir
+
         # Update status of container to Running
         lock_container "$container_id" || { error "Failed to lock container $container_id. exit now"; exit 1; }
         # We need to check again
@@ -127,20 +131,28 @@ do_start() {
 
         local exit_status=0
         # TODO: should we persistent namespace in file? (by unshare --pid=<path of file>)
+        # TODO: limit the capabilities of the init process
+        # TODO: check cmdline for shell script escaping errors
         # Run container with unshare in a empty environment
         # Note: It is necessary to use --fork since we are creating a new pid_namespace
         env -i \
             unshare --pid --user --mount --net \
             --fork --kill-child \
             --map-user=0 --map-group=0 \
-            /bin/sh -c "set -o errexit; \
+            /bin/sh -c "set -o errexit ; \
                 read -d ' ' PID </proc/self/stat ; \
                 echo \$PID > $CONTAINERS_BASE_DIR/$container_id/pid ; \
-                mount -t proc proc $CONTAINERS_BASE_DIR/$container_id/rootfs/proc ; \
-                exec chroot $CONTAINERS_BASE_DIR/$container_id/rootfs $(cat $CONTAINERS_BASE_DIR/$container_id/cmdline)" || { local exit_status=$?; true; }
-
+                echo 1 > $cgroup_dir/cgroup.procs ; \
+                exec unshare --cgroup /bin/sh -c ' \
+                    set -o errexit ; \
+                    mount -t proc proc $CONTAINERS_BASE_DIR/$container_id/rootfs/proc ; \
+                    mount -t sysfs -o ro sys $CONTAINERS_BASE_DIR/$container_id/rootfs/sys ; \
+                    mount -t cgroup2 cgroup $CONTAINERS_BASE_DIR/$container_id/rootfs/sys/fs/cgroup ; \
+                    exec chroot $CONTAINERS_BASE_DIR/$container_id/rootfs $(cat $CONTAINERS_BASE_DIR/$container_id/cmdline)' \
+                " || { local exit_status=$?; true; }
         # Update status of container to exited
         echo "Exited ($exit_status)" >"$CONTAINERS_BASE_DIR/$container_id/status"
+        rmdir $cgroup_dir || true
 
     # Replace stdout and stderr with anonymous pipe. This may looks dirty but, safer. :)
     ) 1> >(cat >>"$CONTAINERS_BASE_DIR/$container_id/stdout") \
@@ -211,6 +223,7 @@ do_stop() {
             sleep "$arg_time"
             kill -KILL "$pid"
         fi
+        rmdir $cgroup_dir || true
     fi
     echo "$container_id"
 }
