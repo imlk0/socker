@@ -10,12 +10,6 @@ do_install() {
     script_path=$(realpath $0)
     echo "install -m 755 ${script_path} /usr/local/bin/socker"
     install -m 755 ${script_path} /usr/local/bin/socker
-
-    # create default vbridge
-    if [[ $(brctl show | grep "vbridge_default") == "" ]]; then
-        brctl addbr vbridge_default
-        ip link set vbridge_default up
-    fi
 }
 
 parse_args_create() {
@@ -70,18 +64,6 @@ do_create() {
     echo "$container_id"
 }
 
-parse_args_ip() {
-    [[ $# -ge 2 ]] || { error "args not provided"; exit 1; }
-    ip_arg_container_id=$1
-    ip_arg_addr=$2
-}
-
-# $1: container_id, $2: ip addr & mask, eg. 10.3.8.211/24
-do_ip_add() {
-    container_id=${ip_arg_container_id:0:8}
-    ip -n "$container_id" addr add "$ip_arg_addr" dev "v$container_id"
-}
-
 do_ps() {
     echo -e "CONTAINER ID\tSTATUS\tCOMMAND"
     for container_id in $(ls "$CONTAINERS_BASE_DIR"); do
@@ -100,13 +82,20 @@ unlock_container() {
     exec 100<&-
 }
 
+init_network() {
+    # create default vbridge
+    if ! brctl show | grep vbridge_default >/dev/null; then
+        brctl addbr vbridge_default
+        ip link set vbridge_default up
+    fi
+}
+
 parse_args_start() {
     arg_container_id=$1
 }
 
 do_start() {
     container_id="$arg_container_id"
-    n_container_id=${container_id:0:8}
     # Check status of this container
     [[ -d "$CONTAINERS_BASE_DIR/$container_id" ]] || { error "Container $container_id does not exist"; exit 1; }
 
@@ -114,6 +103,8 @@ do_start() {
         error "Container $container_id is already running"
         exit 1
     fi
+
+    init_network
 
     # This subshell process (named as 'socker-shim') shall run as long as the container run
     #   socker-shim─┬─2*[bash───cat]
@@ -147,7 +138,10 @@ do_start() {
         fi
         echo "Running" >"$CONTAINERS_BASE_DIR/$container_id/status"
         unlock_container
+
         local shim_status=0
+        veth_container="v${container_id:0:7}"
+        veth_host="veth${container_id:0:7}"
 
         # Failure is allowed now, but we need to catch all errors
         set +o errexit
@@ -157,26 +151,29 @@ do_start() {
         [[ $shim_status -eq 0 ]] && { mkfifo $fifo && exec 3<>$fifo 4>$fifo && exec 3<$fifo && rm -f $fifo || shim_status=$? ; } # socker-shim -> init
         [[ $shim_status -eq 0 ]] && { mkfifo $fifo && exec 5<>$fifo 6>$fifo && exec 5<$fifo && rm -f $fifo || shim_status=$? ; } # socker-shim <- init
 
+        if [[ $shim_status -eq 0 ]]; then
+            ip link delete $veth_host 2>/dev/null
+            ip link delete $veth_container 2>/dev/null
+
+            ip link add $veth_container type veth peer name $veth_host &&
+            brctl addif vbridge_default $veth_host &&
+            ip link set $veth_host up
+
+            shim_status=$?
+        fi
+
         if [[ $shim_status -ne 0 ]]; then
             # Failed before we launch the container 
             error "There is a fault in the socker-shim process, before launch the container."
             echo "Exited ($shim_status)" >"$CONTAINERS_BASE_DIR/$container_id/status"
+            # Do clean up
             rm -f $fifo
             rmdir $cgroup_dir 2>/dev/null
+            ip link delete $veth_host 2>/dev/null
+            ip link delete $veth_container 2>/dev/null
+
             exit $shim_status
         fi
-
-        if [[ $(ls /sys/class/net | grep "v$n_container_id") != "" ]]; then
-            ip link delete v$n_container_id
-        fi
-
-        if [[ $(ls /sys/class/net | grep "b$n_container_id") != "" ]]; then
-            ip link delete b$n_container_id
-        fi
-
-        ip link add v$n_container_id type veth peer name b$n_container_id
-        brctl addif vbridge_default b$n_container_id
-        ip link set b$n_container_id up
 
         local container_exit_status=0
         # TODO: limit the capabilities of the init process
@@ -184,7 +181,7 @@ do_start() {
         # Run container with unshare in a empty environment
         # Note: It is necessary to use --fork since we are creating a new pid_namespace
         env -i \
-            unshare --pid --user --mount \
+            unshare --pid --user --mount --net \
             --fork --kill-child \
             --map-user=0 --map-group=0 \
             /bin/sh -c "set -o errexit ; \
@@ -192,26 +189,33 @@ do_start() {
                 read PID _ </proc/self/stat ; \
                 echo \$PID > $CONTAINERS_BASE_DIR/$container_id/pid ; \
                 echo 'pid ready' >&6 ; \
-                ip netns add $n_container_id ; \
-                ip link set v$n_container_id netns $n_container_id ; \
-                ip -n $n_container_id link set v$n_container_id up ; \
                 echo 1 > $cgroup_dir/cgroup.procs ; \
-                exec nsenter --net=/var/run/netns/$n_container_id unshare --cgroup /bin/sh -c ' \
+                exec unshare --cgroup /bin/sh -c ' \
                     set -o errexit ; \
                     mount -t proc proc $CONTAINERS_BASE_DIR/$container_id/rootfs/proc ; \
                     mount -t sysfs -o ro sys $CONTAINERS_BASE_DIR/$container_id/rootfs/sys ; \
                     mount -t cgroup2 cgroup $CONTAINERS_BASE_DIR/$container_id/rootfs/sys/fs/cgroup ; \
                     read event_veth_set <&3 ; \
+                    ip link set $veth_container name eth0 ; \
+                    ip link set lo up ; \
+                    ip link set eth0 up ; \
                     exec 3<&- 6>&- ; \
                     exec chroot $CONTAINERS_BASE_DIR/$container_id/rootfs $(cat $CONTAINERS_BASE_DIR/$container_id/cmdline)' \
                 " & pid_of_unshare=$!
 
         # prevent from waiting for a died writer or reader
         exec 3<&- 6>&-
-        # wait for pid ready
-        [[ $shim_status -eq 0 ]] && { read evet_pid_ready <&5 || shim_status=$? ; }
-        # TODO: setup veth pair and send to net namespace with `ip link set <veth> netns <pid of init process>`
-        [[ $shim_status -eq 0 ]] && { echo 'veth set' >&4 || shim_status=$? ; }
+
+        if [[ $shim_status -eq 0 ]]; then
+            # wait for pid ready
+            read evet_pid_ready <&5 &&
+            read pid_of_init < $CONTAINERS_BASE_DIR/$container_id/pid &&
+            ip link set $veth_container netns $pid_of_init &&
+            # send veth set event
+            echo 'veth set' >&4
+
+            shim_status=$?
+        fi
 
         exec 5<&- 4>&-
 
@@ -235,7 +239,11 @@ do_start() {
 
         echo "Exited ($shim_status)" >"$CONTAINERS_BASE_DIR/$container_id/status"
 
+        # Do clean up
         rmdir $cgroup_dir 2>/dev/null
+        ip link delete $veth_host 2>/dev/null
+        ip link delete $veth_container 2>/dev/null
+
         exit $shim_status
 
     # Replace stdout and stderr with anonymous pipe. This may looks dirty but, safer. :)
