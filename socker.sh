@@ -128,14 +128,26 @@ do_start() {
         fi
         echo "Running" >"$CONTAINERS_BASE_DIR/$container_id/status"
         unlock_container
+        local shim_status=0
 
+        # Failure is allowed now, but we need to catch all errors
+        set +o errexit
         # Create pipe to communicate with init process
         local fifo=$CONTAINERS_BASE_DIR/$container_id/fifo
         rm -f $fifo
-        mkfifo $fifo && exec 3<>$fifo 4>$fifo && exec 3<$fifo && rm -f $fifo # socker-shim -> init
-        mkfifo $fifo && exec 5<>$fifo 6>$fifo && exec 5<$fifo && rm -f $fifo # socker-shim <- init
+        [[ $shim_status -eq 0 ]] && { mkfifo $fifo && exec 3<>$fifo 4>$fifo && exec 3<$fifo && rm -f $fifo || shim_status=$? ; } # socker-shim -> init
+        [[ $shim_status -eq 0 ]] && { mkfifo $fifo && exec 5<>$fifo 6>$fifo && exec 5<$fifo && rm -f $fifo || shim_status=$? ; } # socker-shim <- init
 
-        local exit_status=0
+        if [[ $shim_status -ne 0 ]]; then
+            # Failed before we launch the container 
+            error "There is a fault in the socker-shim process, before launch the container."
+            echo "Exited ($shim_status)" >"$CONTAINERS_BASE_DIR/$container_id/status"
+            rm -f $fifo
+            rmdir $cgroup_dir 2>/dev/null
+            exit $shim_status
+        fi
+
+        local container_exit_status=0
         # TODO: limit the capabilities of the init process
         # TODO: check cmdline for shell script escaping errors
         # Run container with unshare in a empty environment
@@ -163,17 +175,34 @@ do_start() {
         # prevent from waiting for a died writer or reader
         exec 3<&- 6>&-
         # wait for pid ready
-        read evet_pid_ready <&5 || true
+        [[ $shim_status -eq 0 ]] && { read evet_pid_ready <&5 || shim_status=$? ; }
         # TODO: setup veth pair and send to net namespace with `ip link set <veth> netns <pid of init process>`
-        echo 'veth set' >&4 || true
+        [[ $shim_status -eq 0 ]] && { echo 'veth set' >&4 || shim_status=$? ; }
 
         exec 5<&- 4>&-
-        wait $pid_of_unshare || { local container_exit_status=$?; true; }
 
-        #TODO: capture errors in subshell
-        # Update status of container to exited
-        echo "Exited ($exit_status)" >"$CONTAINERS_BASE_DIR/$container_id/status"
-        rmdir $cgroup_dir 2>/dev/null || true
+        if [[ $shim_status -ne 0 ]]; then
+            if [[ ! -e /proc/$pid_of_unshare ]]; then
+                # The init process has already exited, so we assume that the failure is caused by the init process
+                error "There is a fault in the init process."
+                wait $pid_of_unshare || local container_exit_status=$?
+                shim_status=$container_exit_status
+            else
+                # The init process is still alive, which means that the error is caused by socker-shim
+                error "There is a fault in the socker-shim process."
+                kill -KILL $pid_of_unshare
+                wait $pid_of_unshare
+            fi
+        else
+            # socker-shim did not cause an error, so let's wait for the init process to exit
+            wait $pid_of_unshare || local container_exit_status=$?
+            shim_status=$container_exit_status
+        fi
+
+        echo "Exited ($shim_status)" >"$CONTAINERS_BASE_DIR/$container_id/status"
+
+        rmdir $cgroup_dir 2>/dev/null
+        exit $shim_status
 
     # Replace stdout and stderr with anonymous pipe. This may looks dirty but, safer. :)
     ) 1> >(cat >>"$CONTAINERS_BASE_DIR/$container_id/stdout") \
