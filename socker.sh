@@ -129,8 +129,13 @@ do_start() {
         echo "Running" >"$CONTAINERS_BASE_DIR/$container_id/status"
         unlock_container
 
+        # Create pipe to communicate with init process
+        local fifo=$CONTAINERS_BASE_DIR/$container_id/fifo
+        rm -f $fifo
+        mkfifo $fifo && exec 3<>$fifo 4>$fifo && exec 3<$fifo && rm -f $fifo # socker-shim -> init
+        mkfifo $fifo && exec 5<>$fifo 6>$fifo && exec 5<$fifo && rm -f $fifo # socker-shim <- init
+
         local exit_status=0
-        # TODO: should we persistent namespace in file? (by unshare --pid=<path of file>)
         # TODO: limit the capabilities of the init process
         # TODO: check cmdline for shell script escaping errors
         # Run container with unshare in a empty environment
@@ -139,17 +144,32 @@ do_start() {
             unshare --pid --user --mount --net \
             --fork --kill-child \
             --map-user=0 --map-group=0 \
-            /bin/sh -c "set -o errexit ; \
+            /bin/sh -c "set -o errexit ;\
+                exec 5<&- 4>&- ; \
                 read PID _ </proc/self/stat ; \
                 echo \$PID > $CONTAINERS_BASE_DIR/$container_id/pid ; \
+                echo 'pid ready' >&6 ; \
                 echo 1 > $cgroup_dir/cgroup.procs ; \
                 exec unshare --cgroup /bin/sh -c ' \
                     set -o errexit ; \
                     mount -t proc proc $CONTAINERS_BASE_DIR/$container_id/rootfs/proc ; \
                     mount -t sysfs -o ro sys $CONTAINERS_BASE_DIR/$container_id/rootfs/sys ; \
                     mount -t cgroup2 cgroup $CONTAINERS_BASE_DIR/$container_id/rootfs/sys/fs/cgroup ; \
+                    read event_veth_set <&3 ; \
+                    exec 3<&- 6>&- ; \
                     exec chroot $CONTAINERS_BASE_DIR/$container_id/rootfs $(cat $CONTAINERS_BASE_DIR/$container_id/cmdline)' \
-                " || { local exit_status=$?; true; }
+                " & pid_of_unshare=$!
+
+        # prevent from waiting for a died writer or reader
+        exec 3<&- 6>&-
+        # wait for pid ready
+        read evet_pid_ready <&5 || true
+        # TODO: setup veth pair and send to net namespace with `ip link set <veth> netns <pid of init process>`
+        echo 'veth set' >&4 || true
+
+        exec 5<&- 4>&-
+        wait $pid_of_unshare || { local container_exit_status=$?; true; }
+
         #TODO: capture errors in subshell
         # Update status of container to exited
         echo "Exited ($exit_status)" >"$CONTAINERS_BASE_DIR/$container_id/status"
