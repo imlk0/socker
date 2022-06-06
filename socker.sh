@@ -245,21 +245,21 @@ do_rm() {
 }
 
 error_arg() {
-    error "Unexpected argument: $1"
+    echo "[error] Unexpected argument: $1"
     echo ""
     usage
 }
 
 error() {
-    echo -e "[error] $1"
+    echo "[error] $1" >&2
 }
 
 info() {
-    echo -e "[info] $1"
+    echo "[info] $1" >&2
 }
 
 warning() {
-    echo -e "[warning] $1"
+    echo "[warning] $1" >&2
 }
 
 usage() {
