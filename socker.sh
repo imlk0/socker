@@ -150,9 +150,10 @@ do_start() {
                     mount -t cgroup2 cgroup $CONTAINERS_BASE_DIR/$container_id/rootfs/sys/fs/cgroup ; \
                     exec chroot $CONTAINERS_BASE_DIR/$container_id/rootfs $(cat $CONTAINERS_BASE_DIR/$container_id/cmdline)' \
                 " || { local exit_status=$?; true; }
+        #TODO: capture errors in subshell
         # Update status of container to exited
         echo "Exited ($exit_status)" >"$CONTAINERS_BASE_DIR/$container_id/status"
-        rmdir $cgroup_dir || true
+        rmdir $cgroup_dir 2>/dev/null || true
 
     # Replace stdout and stderr with anonymous pipe. This may looks dirty but, safer. :)
     ) 1> >(cat >>"$CONTAINERS_BASE_DIR/$container_id/stdout") \
@@ -223,7 +224,8 @@ do_stop() {
             sleep "$arg_time"
             kill -KILL "$pid"
         fi
-        rmdir $cgroup_dir || true
+        local cgroup_dir="/sys/fs/cgroup/socker-$container_id"
+        rmdir $cgroup_dir 2>/dev/null || true
     fi
     echo "$container_id"
 }
