@@ -21,6 +21,7 @@ usage_create() {
     echo "options:"
     echo "      --rootfs      (required) A path to the rootfs.tar[.gz|.xz] file, or an unpacked rootfs directory"
     echo "      --ip          The ipv4 address inside the container, should be in range ${DEFAULT_BRIDGE_IP}/24. If not specified, will automatically select one"
+    usage_cgroup_options
 }
 
 parse_args_create() {
@@ -38,9 +39,13 @@ parse_args_create() {
         exit 0
         ;;
     -*)
-        error_arg $1
-        usage_create
-        exit 1
+        if [[ $# -ge 2 ]] && parse_arg_cgroup "$1" "$2" ; then
+            shift ;
+        else
+            error_arg $1
+            usage_create
+            exit 1
+        fi
         ;;
     esac; shift; done
     if [[ $# -ne 0 && "$1" == '--' ]]; then shift; fi
@@ -97,7 +102,8 @@ do_create() {
     fi
     echo "$arg_cmdline" >"$container_dir/cmdline"
     echo "$arg_ip" >"$container_dir/network"
-
+    load_cgroup_config_or_default "$container_id"
+    merge_and_save_cgroup_config "$container_id"
     echo "Created" >"$container_dir/status"
     touch "$container_dir/lock"
 
@@ -171,6 +177,9 @@ do_start() {
     init_network
     read ip < $CONTAINERS_BASE_DIR/$container_id/network
 
+    # Read cgroup config from file
+    load_cgroup_config_or_default "$container_id"
+
     # This subshell process (named as 'socker-shim') shall run as long as the container run
     #   socker-shim─┬─2*[bash───cat]
     #                └─unshare───<container pid 1>
@@ -216,6 +225,7 @@ do_start() {
         [[ $shim_status -eq 0 ]] && { mkfifo $fifo && exec 3<>$fifo 4>$fifo && exec 3<$fifo && rm -f $fifo || shim_status=$? ; } # socker-shim -> init
         [[ $shim_status -eq 0 ]] && { mkfifo $fifo && exec 5<>$fifo 6>$fifo && exec 5<$fifo && rm -f $fifo || shim_status=$? ; } # socker-shim <- init
 
+        # Setup veth pair
         if [[ $shim_status -eq 0 ]]; then
             ip link delete $veth_host 2>/dev/null
             ip link delete $veth_container 2>/dev/null
@@ -224,6 +234,12 @@ do_start() {
             brctl addif ${DEFAULT_BRIDGE} $veth_host &&
             ip link set $veth_host up
 
+            shim_status=$?
+        fi
+
+        # Setup cgroup
+        if [[ $shim_status -eq 0 ]]; then
+            apply_cgroup_config "$cgroup_dir"
             shim_status=$?
         fi
 
@@ -245,6 +261,8 @@ do_start() {
         # TODO: check cmdline for shell script escaping errors
         # Run container with unshare in a empty environment
         # Note: It is necessary to use --fork since we are creating a new pid_namespace
+        # Note: We have to put the init process into the target cgroup before set it into a new cgroup_namespace,
+        #       that is why we separate the `unshare --cgroup` from the previous `unshare`
         env -i \
             unshare --pid --user --mount --net \
             --fork --kill-child \
@@ -399,10 +417,14 @@ stop_container() {
 
     if [[ -d "$CONTAINERS_BASE_DIR/$container_id" && $(cat "$CONTAINERS_BASE_DIR/$container_id/status") == "Running" ]]; then
         read pid <"$CONTAINERS_BASE_DIR/$container_id/pid"
-        kill -TERM "$pid"
         if [[ -d "/proc/$pid" ]]; then
-            sleep "$timeout"
-            kill -KILL "$pid"
+            kill -TERM "$pid"
+            if [[ -d "/proc/$pid" ]]; then
+                sleep "$timeout"
+                kill -KILL "$pid"
+            fi
+        else # The container exited due to an uncaught error in socker-shim. Here we mark the status as Exited directly
+            echo "Exited" >"$CONTAINERS_BASE_DIR/$container_id/status"
         fi
     fi
     local cgroup_dir="/sys/fs/cgroup/socker-$container_id"
@@ -427,6 +449,110 @@ do_rm() {
     [[ $(cat "$CONTAINERS_BASE_DIR/$container_id/status") != "Running" ]] || { error "Container $container_id is running. You need to stop it before remove."; exit 1; }
     rm -rf $CONTAINERS_BASE_DIR/$container_id
     echo "$container_id"
+}
+
+
+usage_cgroup_options(){
+    echo "      --cpuset-cpus CPU(s) numbers on which the container is to run, e.g. 0-4,6,8-10. See 'cpuset.cpus' in cgroup v2"
+    echo "      --cpu-shares  Relative weights of CPU shares, in the range [1, 10000]. See 'cpu.weight' in cgroup v2"
+    echo "      --memory      Max memory can be used (in bytes), e.g. 1G or 512M or max (default: max). See 'memory' in cgroup v2"
+    echo "      --pids-limit  Maximum number of pids allowed in the container (default: max). See 'pids.max' in cgroup v2"
+}
+
+parse_arg_cgroup() {
+    case $1 in
+    --cpuset-cpus)
+        arg_cpuset_cpus=$2
+        ;;
+    --cpu-shares)
+        arg_cpu_shares=$2
+        ;;
+    --memory)
+        arg_memory=$2
+        ;;
+    --pids-limit)
+        arg_pids_limit=$2
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+    return 0
+}
+
+merge_and_save_cgroup_config() {
+    local container_id="$1"
+    local config_file="$CONTAINERS_BASE_DIR/$container_id/cgroup"
+    :> "$config_file"
+    # If $arg_xxxx is not set, use the value of $cgroup_xxxx, otherwise use $arg_xxxx
+    echo "cgroup_cpuset_cpus='${arg_cpuset_cpus-${cgroup_cpuset_cpus}}'" >> "$config_file"  # cpuset.cpus
+    echo "cgroup_cpu_shares='${arg_cpu_shares-${cgroup_cpu_shares}}'" >> "$config_file"     # cpu.weight
+    echo "cgroup_memory='${arg_memory-${cgroup_memory}}'" >> "$config_file"                 # memory.max
+    echo "cgroup_pids_limit='${arg_pids_limit-${cgroup_pids_limit}}'" >> "$config_file"     # pids.max
+}
+
+load_cgroup_config_or_default() {
+    local container_id="$1"
+    local config_file="$CONTAINERS_BASE_DIR/$container_id/cgroup"
+    # load default value
+    cgroup_cpuset_cpus=""
+    cgroup_cpu_shares=""
+    cgroup_memory=""
+    cgroup_pids_limit=""
+    # override with value from config file
+    [[ ! -e "$config_file" ]] || source "$config_file" # OK, this is indeed very unsafe, but the simplest
+}
+
+apply_cgroup_config() {
+    local cgroup_dir="$1"
+
+    echo "$cgroup_cpuset_cpus" > "$cgroup_dir/cpuset.cpus" # For cpuset.cpus, a empty value is valid
+    [[ -z "$cgroup_cpu_shares" ]] || echo "$cgroup_cpu_shares" > "$cgroup_dir/cpu.weight"
+    [[ -z "$cgroup_memory" ]] || echo "$cgroup_memory" > "$cgroup_dir/memory.max"
+    [[ -z "$cgroup_pids_limit" ]] || echo "$cgroup_pids_limit" > "$cgroup_dir/pids.max"
+}
+
+usage_update() {
+    echo "usage:    socker update [options] <container>"
+    echo ""
+    echo "options:"
+    usage_cgroup_options
+}
+
+parse_args_update() {
+    while [[ $# -ne 0 && "$1" =~ ^- ]]; do case $1 in
+    -h | --help)
+        usage_update
+        exit 0
+        ;;
+    -*)
+        if [[ $# -ge 2 ]] && parse_arg_cgroup "$1" "$2" ; then
+            shift ;
+        else
+            error_arg $1
+            usage_update
+            exit 1
+        fi
+        ;;
+    esac; shift; done
+
+    [[ $# -ne 0 ]] || { error "container_id not provided"; exit 1; }
+    arg_container_id="$1"
+    shift
+}
+
+do_update() {
+    local container_id="$arg_container_id"
+    # update and save cgroup config
+    load_cgroup_config_or_default "$container_id"
+    merge_and_save_cgroup_config "$container_id"
+
+    if [[ $(cat "$CONTAINERS_BASE_DIR/$container_id/status") == "Running" ]]; then
+        # reload and apply cgroup config
+        load_cgroup_config_or_default "$container_id"
+        local cgroup_dir="/sys/fs/cgroup/socker-$container_id"
+        apply_cgroup_config "$cgroup_dir"
+    fi
 }
 
 do_reset() {
@@ -525,6 +651,12 @@ rm)
     shift
     parse_args_rm "$@"
     do_rm
+    exit 0
+    ;;
+update)
+    shift
+    parse_args_update "$@"
+    do_update
     exit 0
     ;;
 reset)
