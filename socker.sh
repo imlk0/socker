@@ -393,19 +393,25 @@ parse_args_stop() {
     arg_container_id="$1"
 }
 
-do_stop() {
-    container_id="$arg_container_id"
+stop_container() {
+    local container_id=$1
+    local timeout=$2
 
     if [[ -d "$CONTAINERS_BASE_DIR/$container_id" && $(cat "$CONTAINERS_BASE_DIR/$container_id/status") == "Running" ]]; then
         read pid <"$CONTAINERS_BASE_DIR/$container_id/pid"
         kill -TERM "$pid"
         if [[ -d "/proc/$pid" ]]; then
-            sleep "$arg_time"
+            sleep "$timeout"
             kill -KILL "$pid"
         fi
-        local cgroup_dir="/sys/fs/cgroup/socker-$container_id"
-        rmdir $cgroup_dir 2>/dev/null || true
     fi
+    local cgroup_dir="/sys/fs/cgroup/socker-$container_id"
+    rmdir $cgroup_dir 2>/dev/null || true
+}
+
+do_stop() {
+    local container_id="$arg_container_id"
+    stop_container "$container_id" "$arg_time"
     echo "$container_id"
 }
 
@@ -421,6 +427,18 @@ do_rm() {
     [[ $(cat "$CONTAINERS_BASE_DIR/$container_id/status") != "Running" ]] || { error "Container $container_id is running. You need to stop it before remove."; exit 1; }
     rm -rf $CONTAINERS_BASE_DIR/$container_id
     echo "$container_id"
+}
+
+do_reset() {
+    # Force stop and remove all containers
+    if [[ -e $CONTAINERS_BASE_DIR ]]; then
+        for container_id in $(ls "$CONTAINERS_BASE_DIR"); do
+            stop_container "$container_id" 0
+        done
+        rm -rf "$CONTAINERS_BASE_DIR"
+    fi
+    # reset network
+    reset_network
 }
 
 error_arg() {
@@ -454,6 +472,7 @@ usage() {
     echo "    stop            Stop a running container"
     echo "    rm              Remove a container"
     echo "    ps              List all containers"
+    echo "    reset           Remove all containers and reset network. In short, reset everything"
 }
 
 # TODO: should we be root? consider an uid namespace
@@ -506,6 +525,11 @@ rm)
     shift
     parse_args_rm "$@"
     do_rm
+    exit 0
+    ;;
+reset)
+    shift
+    do_reset
     exit 0
     ;;
 *)
