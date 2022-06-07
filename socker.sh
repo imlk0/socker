@@ -12,6 +12,13 @@ do_install() {
     install -m 755 ${script_path} /usr/local/bin/socker
 }
 
+usage_create() {
+    echo "usage:    socker create [options] <cmdline>"
+    echo ""
+    echo "options:"
+    echo "      --rootfs      (required) A path to the rootfs.tar[.gz|.xz] file, or an unpacked rootfs directory"
+}
+
 parse_args_create() {
     while [[ $# -ne 0 && "$1" =~ ^- && ! "$1" == "--" ]]; do case $1 in
     --rootfs)
@@ -19,6 +26,7 @@ parse_args_create() {
         ;;
     -*)
         error_arg $1
+        usage_create
         exit 1
         ;;
     esac; shift; done
@@ -245,6 +253,10 @@ do_start() {
     echo $container_id
 }
 
+usage_exec() {
+    echo "usage:    socker exec <container> <cmdline>"
+}
+
 parse_args_exec() {
     arg_interactive=0
     arg_tty=0
@@ -256,8 +268,13 @@ parse_args_exec() {
     -t | --tty)
         arg_tty=1
         ;;
+    -h | --help)
+        usage_exec
+        exit 0
+        ;;
     -*)
         error_arg $1
+        usage_exec
         exit 1
         ;;
     esac; shift; done
@@ -282,14 +299,26 @@ do_exec() {
     # TODO: check `arg_interactive` and `arg_tty`
 }
 
+usage_stop() {
+    echo "usage:    socker stop [options] <container>"
+    echo ""
+    echo "options:"
+    echo "   -t, --time      Seconds to wait for stop before killing it (default 10)"
+}
+
 parse_args_stop() {
     arg_time=10
     while [[ $# -ne 0 && "$1" =~ ^- ]]; do case $1 in
     -t | --time)
         shift; arg_time=$1
         ;;
+    -h | --help)
+        usage_stop
+        exit 0
+        ;;
     -*)
         error_arg $1
+        usage_stop
         exit 1
         ;;
     esac; shift; done
@@ -331,7 +360,6 @@ do_rm() {
 error_arg() {
     echo "[error] Unexpected argument: $1"
     echo ""
-    usage
 }
 
 error() {
@@ -353,10 +381,13 @@ usage() {
     echo "    socker <command> [options]"
     echo ""
     echo "command:"
-    echo "      install                           Copy this script to /usr/local/bin/socker"
-    echo "      create                            Create a container"
-    echo "      start                             Start a container"
-    echo "      ps                                List all containers"
+    echo "    install         Copy this script to /usr/local/bin/socker"
+    echo "    create          Create a container"
+    echo "    start           Start a container"
+    echo "    exec            Execute a command in a running container"
+    echo "    stop            Stop a running container"
+    echo "    rm              Remove a container"
+    echo "    ps              List all containers"
 }
 
 # TODO: should we be root? consider an uid namespace
@@ -413,6 +444,7 @@ rm)
     ;;
 *)
     error_arg $1
+    usage
     exit 1
     ;;
 esac
