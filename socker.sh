@@ -5,6 +5,9 @@ set -o pipefail # Unveils hidden failures
 set -o nounset  # Exposes unset variables
 
 CONTAINERS_BASE_DIR=/var/lib/socker/containers
+DEFAULT_BRIDGE=vbridge_default
+DEFAULT_BRIDGE_IP=192.168.101.1
+DEFAULT_BRIDGE_IP_PREFIX=192.168.101
 
 do_install() {
     script_path=$(realpath $0)
@@ -17,12 +20,18 @@ usage_create() {
     echo ""
     echo "options:"
     echo "      --rootfs      (required) A path to the rootfs.tar[.gz|.xz] file, or an unpacked rootfs directory"
+    echo "      --ip          The ipv4 address inside the container, should be in range ${DEFAULT_BRIDGE_IP}/24. If not specified, will automatically select one"
 }
 
 parse_args_create() {
+    arg_ip=""
+
     while [[ $# -ne 0 && "$1" =~ ^- && ! "$1" == "--" ]]; do case $1 in
     --rootfs)
         shift; arg_rootfs=$1
+        ;;
+    --ip)
+        shift; arg_ip=$1
         ;;
     -h | --help)
         usage_create
@@ -46,10 +55,36 @@ gen_random_id() {
     head -c6 /dev/urandom | hexdump -e '1/1 "%.2x"'
 }
 
+assign_ip() {
+    local ip_in_use=($DEFAULT_BRIDGE_IP)
+    local ip=""
+    for network_config in $CONTAINERS_BASE_DIR/*/network; do
+        read ip < $network_config
+        if [[ ! -z $ip ]]; then ip_in_use+=("$ip"); fi
+    done 2>/dev/null
+    # We assume that the host number takes up 8 bits
+    for host_num in {1..254}; do
+        ip="${DEFAULT_BRIDGE_IP_PREFIX}.${host_num}"
+        if [[ ! " ${ip_in_use[@]} " =~ " $ip " ]]; then
+            echo "$ip"
+            return 0
+        fi
+    done
+    return 1
+}
+
 do_create() {
     local container_id="$(gen_random_id)"
     local container_dir="$CONTAINERS_BASE_DIR/$container_id"
     mkdir -p "$container_dir"
+
+    if [[ -z "$arg_ip" ]]; then
+        arg_ip="$(assign_ip)"
+        if [[ $? -ne 0 ]]; then
+            error "failed to find a free ip address"
+            exit 1
+        fi
+    fi
 
     # If --rootfs is pointed to a dir, just use it.
     if [[ -d "$arg_rootfs" ]]; then
@@ -61,7 +96,7 @@ do_create() {
         error "bad rootfs"; exit 1
     fi
     echo "$arg_cmdline" >"$container_dir/cmdline"
-
+    echo "$arg_ip" >"$container_dir/network"
 
     echo "Created" >"$container_dir/status"
     touch "$container_dir/lock"
@@ -70,10 +105,16 @@ do_create() {
 }
 
 do_ps() {
-    echo -e "CONTAINER ID\tSTATUS\tCOMMAND"
-    for container_id in $(ls "$CONTAINERS_BASE_DIR"); do
-        echo -e "$container_id\t$(cat $CONTAINERS_BASE_DIR/$container_id/status)\t$(cat $CONTAINERS_BASE_DIR/$container_id/cmdline)"
-    done
+    printf "%s\t%-30.30s\t%-15.15s\t%s\n" "CONTAINER ID" "COMMAND" "STATUS" "NETWORK"
+    if [[ -e "$CONTAINERS_BASE_DIR" ]]; then
+        for container_id in $(ls "$CONTAINERS_BASE_DIR"); do
+            local cmdline=$(cat $CONTAINERS_BASE_DIR/$container_id/cmdline 2>/dev/null)
+            local status=$(cat $CONTAINERS_BASE_DIR/$container_id/status 2>/dev/null)
+            local network=$(cat $CONTAINERS_BASE_DIR/$container_id/network 2>/dev/null)
+
+            printf "%s\t%-30.30s\t%-15.15s\t%s\n" "$container_id" "$cmdline" "$status" "$network"
+        done
+    fi
 }
 
 lock_container() {
@@ -89,10 +130,28 @@ unlock_container() {
 
 init_network() {
     # create default vbridge
-    if ! brctl show | grep vbridge_default >/dev/null; then
-        brctl addbr vbridge_default
-        ip link set vbridge_default up
+    if ! brctl show | grep ${DEFAULT_BRIDGE} >/dev/null; then
+        brctl addbr ${DEFAULT_BRIDGE}
+        ip link set ${DEFAULT_BRIDGE} up
+        ip addr add ${DEFAULT_BRIDGE_IP}/24 dev ${DEFAULT_BRIDGE}
+        echo 1 > /proc/sys/net/ipv4/ip_forward
+        iptables -t nat -A POSTROUTING -s ${DEFAULT_BRIDGE_IP}/24 ! -o ${DEFAULT_BRIDGE} -j MASQUERADE
+        iptables -t filter -A FORWARD -i any -o ${DEFAULT_BRIDGE} -j ACCEPT
+        iptables -t filter -A FORWARD -i ${DEFAULT_BRIDGE} -o ${DEFAULT_BRIDGE} -j ACCEPT
+        iptables -t filter -A FORWARD -i ${DEFAULT_BRIDGE} ! -o ${DEFAULT_BRIDGE} -j ACCEPT
     fi
+}
+
+reset_network() {
+    # delete default vbridge
+    if brctl show | grep ${DEFAULT_BRIDGE} >/dev/null; then
+        ip link set ${DEFAULT_BRIDGE} down
+        brctl delbr ${DEFAULT_BRIDGE}
+    fi
+    iptables -t nat -D POSTROUTING -s ${DEFAULT_BRIDGE_IP}/24 ! -o ${DEFAULT_BRIDGE} -j MASQUERADE 2>/dev/null || true
+    iptables -t filter -D FORWARD -i any -o ${DEFAULT_BRIDGE} -j ACCEPT 2>/dev/null || true
+    iptables -t filter -D FORWARD -i ${DEFAULT_BRIDGE} -o ${DEFAULT_BRIDGE} -j ACCEPT 2>/dev/null || true
+    iptables -t filter -D FORWARD -i ${DEFAULT_BRIDGE} ! -o ${DEFAULT_BRIDGE} -j ACCEPT 2>/dev/null || true
 }
 
 parse_args_start() {
@@ -110,6 +169,7 @@ do_start() {
     fi
 
     init_network
+    read ip < $CONTAINERS_BASE_DIR/$container_id/network
 
     # This subshell process (named as 'socker-shim') shall run as long as the container run
     #   socker-shim─┬─2*[bash───cat]
@@ -161,7 +221,7 @@ do_start() {
             ip link delete $veth_container 2>/dev/null
 
             ip link add $veth_container type veth peer name $veth_host &&
-            brctl addif vbridge_default $veth_host &&
+            brctl addif ${DEFAULT_BRIDGE} $veth_host &&
             ip link set $veth_host up
 
             shim_status=$?
@@ -204,6 +264,8 @@ do_start() {
                     ip link set $veth_container name eth0 ; \
                     ip link set lo up ; \
                     ip link set eth0 up ; \
+                    ip addr add $ip/24 dev eth0 ; \
+                    ip route add default via ${DEFAULT_BRIDGE_IP} ; \
                     exec 3<&- 6>&- ; \
                     exec chroot $CONTAINERS_BASE_DIR/$container_id/rootfs $(cat $CONTAINERS_BASE_DIR/$container_id/cmdline)' \
                 " & pid_of_unshare=$!
