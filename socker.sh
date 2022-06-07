@@ -13,27 +13,19 @@ do_install() {
 }
 
 parse_args_create() {
-    while true; do
-        [[ $# -ne 0 ]] || break
-        case $1 in
-        --rootfs=*)
-            arg_rootfs="${1:9}"
-            shift
-            ;;
-        -)
-            shift
-            break
-            ;;
-        -*)
-            error_arg $1
-            exit 1
-            ;;
-        *)
-            break
-            ;;
-        esac
-        arg_cmd="$@"
-    done
+    while [[ $# -ne 0 && "$1" =~ ^- && ! "$1" == "--" ]]; do case $1 in
+    --rootfs)
+        shift; arg_rootfs=$1
+        ;;
+    -*)
+        error_arg $1
+        exit 1
+        ;;
+    esac; shift; done
+    if [[ $# -ne 0 && "$1" == '--' ]]; then shift; fi
+
+    [[ $# -ne 0 ]] || { error "cmdline not provided"; exit 1; }
+    arg_cmdline="$@"
 
     # TODO: check for essential arguments
 }
@@ -56,8 +48,9 @@ do_create() {
     else
         error "bad rootfs"; exit 1
     fi
+    echo "$arg_cmdline" >"$container_dir/cmdline"
 
-    echo "$arg_cmd" >"$container_dir/cmdline"
+
     echo "Created" >"$container_dir/status"
     touch "$container_dir/lock"
 
