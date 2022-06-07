@@ -24,6 +24,10 @@ parse_args_create() {
     --rootfs)
         shift; arg_rootfs=$1
         ;;
+    -h | --help)
+        usage_create
+        exit 0
+        ;;
     -*)
         error_arg $1
         usage_create
