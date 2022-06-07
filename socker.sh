@@ -43,7 +43,7 @@ parse_args_create() {
 }
 
 gen_random_id() {
-    head -c6 /dev/urandom | hexdump '-e"%x"'
+    head -c6 /dev/urandom | hexdump -e '1/1 "%.2x"'
 }
 
 do_create() {
