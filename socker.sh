@@ -175,7 +175,7 @@ do_start() {
     fi
 
     init_network
-    read ip < $CONTAINERS_BASE_DIR/$container_id/network
+    read container_ip < $CONTAINERS_BASE_DIR/$container_id/network
 
     # Read cgroup config from file
     load_cgroup_config_or_default "$container_id"
@@ -237,6 +237,19 @@ do_start() {
             shim_status=$?
         fi
 
+        # Setup files to be mount --bind
+        if [[ $shim_status -eq 0 ]]; then
+            local bind_files="$CONTAINERS_BASE_DIR/$container_id/bind_files"
+
+            mkdir -p "$bind_files" &&
+            mkdir -p "$bind_files/etc" &&
+            cp /etc/resolv.conf "$bind_files/etc/resolv.conf" &&
+            printf "$container_id" > "$bind_files/etc/hostname" &&
+            printf "127.0.0.1\tlocalhost\n::1\tlocalhost\n%s\t%s\n" "$container_ip" "$container_id" > "$bind_files/etc/hosts"
+
+            shim_status=$?
+        fi
+
         # Setup cgroup
         if [[ $shim_status -eq 0 ]]; then
             apply_cgroup_config "$cgroup_dir"
@@ -256,6 +269,7 @@ do_start() {
             exit $shim_status
         fi
 
+        local rootfs="$CONTAINERS_BASE_DIR/$container_id/rootfs"
         local container_exit_status=0
         # TODO: limit the capabilities of the init process
         # TODO: check cmdline for shell script escaping errors
@@ -264,7 +278,7 @@ do_start() {
         # Note: We have to put the init process into the target cgroup before set it into a new cgroup_namespace,
         #       that is why we separate the `unshare --cgroup` from the previous `unshare`
         env -i \
-            unshare --pid --user --mount --net \
+            unshare --pid --user --mount --net --uts \
             --fork --kill-child \
             --map-user=0 --map-group=0 \
             /bin/sh -c "set -o errexit ; \
@@ -275,17 +289,21 @@ do_start() {
                 echo 1 > $cgroup_dir/cgroup.procs ; \
                 exec unshare --cgroup /bin/sh -c ' \
                     set -o errexit ; \
-                    mount -t proc proc $CONTAINERS_BASE_DIR/$container_id/rootfs/proc ; \
-                    mount -t sysfs -o ro sys $CONTAINERS_BASE_DIR/$container_id/rootfs/sys ; \
-                    mount -t cgroup2 cgroup $CONTAINERS_BASE_DIR/$container_id/rootfs/sys/fs/cgroup ; \
+                    mount -t proc proc $rootfs/proc ; \
+                    mount -t sysfs -o ro sys $rootfs/sys ; \
+                    mount -t cgroup2 cgroup $rootfs/sys/fs/cgroup ; \
+                    mount --bind $bind_files/etc/resolv.conf $rootfs/etc/resolv.conf ; \
+                    mount --bind $bind_files/etc/hosts $rootfs/etc/hosts ; \
+                    mount --bind $bind_files/etc/hostname $rootfs/etc/hostname ; \
+                    hostname $container_id ; \
                     read event_veth_set <&3 ; \
                     ip link set $veth_container name eth0 ; \
                     ip link set lo up ; \
                     ip link set eth0 up ; \
-                    ip addr add $ip/24 dev eth0 ; \
+                    ip addr add $container_ip/24 dev eth0 ; \
                     ip route add default via ${DEFAULT_BRIDGE_IP} ; \
                     exec 3<&- 6>&- ; \
-                    exec chroot $CONTAINERS_BASE_DIR/$container_id/rootfs $(cat $CONTAINERS_BASE_DIR/$container_id/cmdline)' \
+                    exec chroot $rootfs $(cat $CONTAINERS_BASE_DIR/$container_id/cmdline)' \
                 " & pid_of_unshare=$!
 
         # prevent from waiting for a died writer or reader
