@@ -601,11 +601,10 @@ usage() {
     echo "    reset           Remove all containers and reset network. In short, reset everything"
 }
 
-# TODO: should we be root? consider an uid namespace
-# if [[ ${EUID} -ne 0 ]]; then
-#     error "This script must be run as root"
-#     exit 1
-# fi
+if [[ ${EUID} -ne 0 ]]; then
+    error "This script must be run as root"
+    exit 1
+fi
 
 # Exit if no argument provided
 if [[ $# -eq 0 ]]; then
