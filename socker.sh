@@ -397,7 +397,10 @@ do_exec() {
     [[ $(cat "$CONTAINERS_BASE_DIR/$container_id/status") == "Running" ]] || { error "Container $container_id is not running"; exit 1; }
 
     read pid <"$CONTAINERS_BASE_DIR/$container_id/pid"
-    env -i nsenter --all --target "$pid" --root --wdns=/ $arg_cmdline
+    local cgroup_dir="/sys/fs/cgroup/socker-$container_id"
+    env -i nsenter --pid --user --mount --net --uts --target "$pid" /bin/sh -c \
+        'echo $$ >>'"$cgroup_dir/cgroup.procs ; \
+        exec env -i nsenter --target $pid --cgroup --root --wdns=/ $arg_cmdline"
     # TODO: check `arg_interactive` and `arg_tty`
 }
 
