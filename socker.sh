@@ -303,7 +303,10 @@ do_start() {
                     ip addr add $container_ip/24 dev eth0 ; \
                     ip route add default via ${DEFAULT_BRIDGE_IP} ; \
                     exec 3<&- 6>&- ; \
-                    exec chroot $rootfs $(cat $CONTAINERS_BASE_DIR/$container_id/cmdline)' \
+                    exec env -i \
+                        PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+                        HOSTNAME=$container_id \
+                        chroot $rootfs $(cat $CONTAINERS_BASE_DIR/$container_id/cmdline)' \
                 " & pid_of_unshare=$!
 
         # prevent from waiting for a died writer or reader
@@ -403,8 +406,12 @@ do_exec() {
     read pid <"$CONTAINERS_BASE_DIR/$container_id/pid"
     local cgroup_dir="/sys/fs/cgroup/socker-$container_id"
     env -i nsenter --pid --user --mount --net --uts --target "$pid" /bin/sh -c \
-        'echo $$ >>'"$cgroup_dir/cgroup.procs ; \
-        exec env -i nsenter --target $pid --cgroup --root --wdns=/ $arg_cmdline"
+        "echo \$\$ >> $cgroup_dir/cgroup.procs ; \
+        exec env -i \
+            PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            HOSTNAME=$container_id \
+            TERM=xterm \
+            nsenter --target $pid --cgroup --root --wdns=/ $arg_cmdline"
     # TODO: check `arg_interactive` and `arg_tty`
 }
 
