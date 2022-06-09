@@ -405,13 +405,14 @@ do_exec() {
 
     read pid <"$CONTAINERS_BASE_DIR/$container_id/pid"
     local cgroup_dir="/sys/fs/cgroup/socker-$container_id"
+    local rootfs="$CONTAINERS_BASE_DIR/$container_id/rootfs"
     env -i nsenter --pid --user --mount --net --uts --target "$pid" /bin/sh -c \
         "echo \$\$ >> $cgroup_dir/cgroup.procs ; \
         exec env -i \
             PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             HOSTNAME=$container_id \
             TERM=xterm \
-            nsenter --target $pid --cgroup --root --wdns=/ $arg_cmdline"
+            nsenter --target $pid --cgroup chroot $rootfs $arg_cmdline"
     # TODO: check `arg_interactive` and `arg_tty`
 }
 
