@@ -280,12 +280,12 @@ do_start() {
         env -i \
             unshare --pid --user --mount --net --uts \
             --fork --kill-child \
-            --map-user=0 --map-group=0 \
             /bin/sh -c "set -o errexit ; \
                 exec 5<&- 4>&- ; \
                 read PID _ </proc/self/stat ; \
                 echo \$PID > $CONTAINERS_BASE_DIR/$container_id/pid ; \
                 echo 'pid ready' >&6 ; \
+                read event_pid_map <&3 ; \
                 echo 1 > $cgroup_dir/cgroup.procs ; \
                 exec unshare --cgroup /bin/sh -c ' \
                     set -o errexit ; \
@@ -313,6 +313,10 @@ do_start() {
             # wait for pid ready
             read evet_pid_ready <&5 &&
             read pid_of_init < $CONTAINERS_BASE_DIR/$container_id/pid &&
+            # set uid_map and gid_map
+            echo -n "0 0 65536" > "/proc/$pid_of_init/uid_map" &&
+            echo -n "0 0 65536" > "/proc/$pid_of_init/gid_map" &&
+            echo 'uid map' >&4 &&
             ip link set $veth_container netns $pid_of_init &&
             # send veth set event
             echo 'veth set' >&4
