@@ -9,6 +9,12 @@ DEFAULT_BRIDGE=vbridge_default
 DEFAULT_BRIDGE_IP=192.168.101.1
 DEFAULT_BRIDGE_IP_PREFIX=192.168.101
 
+is_cgroup2=`[[ -e /sys/fs/cgroup/cgroup.controllers ]]; echo $?`
+
+warning_on_no_cgroup2() {
+    [[ $is_cgroup2 -eq 0 ]] || warning "Seems that your host side is not using cgroup2, in which case we will suppress all features that depend on it."
+}
+
 do_install() {
     script_path=$(realpath $0)
     echo "install -m 755 ${script_path} /usr/local/bin/socker"
@@ -165,6 +171,8 @@ parse_args_start() {
 }
 
 do_start() {
+    warning_on_no_cgroup2
+
     container_id="$arg_container_id"
     # Check status of this container
     [[ -d "$CONTAINERS_BASE_DIR/$container_id" ]] || { error "Container $container_id does not exist"; exit 1; }
@@ -201,7 +209,7 @@ do_start() {
 
         # Create a cgroup for init process
         local cgroup_dir="/sys/fs/cgroup/socker-$container_id"
-        mkdir -p $cgroup_dir
+        [ $is_cgroup2 -ne 0 ] || mkdir -p $cgroup_dir
 
         # Update status of container to Running
         lock_container "$container_id" || { error "Failed to lock container $container_id. exit now"; exit 1; }
@@ -252,7 +260,7 @@ do_start() {
 
         # Setup cgroup
         if [[ $shim_status -eq 0 ]]; then
-            apply_cgroup_config "$cgroup_dir"
+            [ $is_cgroup2 -ne 0 ] || apply_cgroup_config "$cgroup_dir"
             shim_status=$?
         fi
 
@@ -262,7 +270,7 @@ do_start() {
             echo "Exited ($shim_status)" >"$CONTAINERS_BASE_DIR/$container_id/status"
             # Do clean up
             rm -f $fifo
-            rmdir $cgroup_dir 2>/dev/null
+            [ $is_cgroup2 -ne 0 ] || rmdir $cgroup_dir 2>/dev/null
             ip link delete $veth_host 2>/dev/null
             ip link delete $veth_container 2>/dev/null
 
@@ -286,7 +294,7 @@ do_start() {
                 echo \$PID > $CONTAINERS_BASE_DIR/$container_id/pid ; \
                 echo 'pid ready' >&6 ; \
                 read event_pid_map <&3 ; \
-                echo 1 > $cgroup_dir/cgroup.procs ; \
+                [ $is_cgroup2 -ne 0 ] || echo 1 > $cgroup_dir/cgroup.procs ; \
                 exec unshare --cgroup /bin/sh -c ' \
                     set -o errexit ; \
                     mount -t proc proc $rootfs/proc ; \
@@ -350,7 +358,7 @@ do_start() {
         echo "Exited ($shim_status)" >"$CONTAINERS_BASE_DIR/$container_id/status"
 
         # Do clean up
-        rmdir $cgroup_dir 2>/dev/null
+        [ $is_cgroup2 -ne 0 ] || rmdir $cgroup_dir 2>/dev/null
         ip link delete $veth_host 2>/dev/null
         ip link delete $veth_container 2>/dev/null
 
@@ -407,7 +415,7 @@ do_exec() {
     local cgroup_dir="/sys/fs/cgroup/socker-$container_id"
     local rootfs="$CONTAINERS_BASE_DIR/$container_id/rootfs"
     env -i nsenter --pid --user --mount --net --uts --target "$pid" /bin/sh -c \
-        "echo \$\$ >> $cgroup_dir/cgroup.procs ; \
+        "[ $is_cgroup2 -ne 0 ] || echo \$\$ >> $cgroup_dir/cgroup.procs ; \
         exec env -i \
             PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             HOSTNAME=$container_id \
@@ -461,7 +469,7 @@ stop_container() {
         fi
     fi
     local cgroup_dir="/sys/fs/cgroup/socker-$container_id"
-    rmdir $cgroup_dir 2>/dev/null || true
+    [ $is_cgroup2 -ne 0 ] || rmdir $cgroup_dir 2>/dev/null || true
 }
 
 do_stop() {
@@ -539,10 +547,15 @@ load_cgroup_config_or_default() {
 apply_cgroup_config() {
     local cgroup_dir="$1"
 
-    echo "$cgroup_cpuset_cpus" > "$cgroup_dir/cpuset.cpus" # For cpuset.cpus, a empty value is valid
-    [[ -z "$cgroup_cpu_shares" ]] || echo "$cgroup_cpu_shares" > "$cgroup_dir/cpu.weight"
-    [[ -z "$cgroup_memory" ]] || echo "$cgroup_memory" > "$cgroup_dir/memory.max"
-    [[ -z "$cgroup_pids_limit" ]] || echo "$cgroup_pids_limit" > "$cgroup_dir/pids.max"
+    warning_on_missing() {
+        [[ -e $1 ]] || warning "This kernel does not support this cgroup2 parameter: $(basename $1)"
+        [[ ! -e $1 ]] # return true if not exist
+    }
+
+    warning_on_missing "$cgroup_dir/cpuset.cpus" || echo "$cgroup_cpuset_cpus" > "$cgroup_dir/cpuset.cpus" # For cpuset.cpus, a empty value is valid
+    [[ -z "$cgroup_cpu_shares" ]] || warning_on_missing "$cgroup_dir/cpu.weight" || echo "$cgroup_cpu_shares" > "$cgroup_dir/cpu.weight"
+    [[ -z "$cgroup_memory" ]] || warning_on_missing "$cgroup_dir/memory.max" || echo "$cgroup_memory" > "$cgroup_dir/memory.max"
+    [[ -z "$cgroup_pids_limit" ]] || warning_on_missing "$cgroup_dir/pids.max" || echo "$cgroup_pids_limit" > "$cgroup_dir/pids.max"
 }
 
 usage_update() {
@@ -580,11 +593,13 @@ do_update() {
     load_cgroup_config_or_default "$container_id"
     merge_and_save_cgroup_config "$container_id"
 
+    warning_on_no_cgroup2
+
     if [[ $(cat "$CONTAINERS_BASE_DIR/$container_id/status") == "Running" ]]; then
         # reload and apply cgroup config
         load_cgroup_config_or_default "$container_id"
         local cgroup_dir="/sys/fs/cgroup/socker-$container_id"
-        apply_cgroup_config "$cgroup_dir"
+        [ $is_cgroup2 -ne 0 ] || apply_cgroup_config "$cgroup_dir"
     fi
 }
 
