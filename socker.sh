@@ -643,6 +643,7 @@ usage() {
     echo "    create          Create a container"
     echo "    start           Start a container"
     echo "    exec            Execute a command in a running container"
+    echo "    update          Update configuration of container"
     echo "    stop            Stop a running container"
     echo "    rm              Remove a container"
     echo "    ps              List all containers"
