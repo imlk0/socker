@@ -633,8 +633,6 @@ warning() {
 }
 
 usage() {
-    echo "Run cmd in a isolation network namespace."
-    echo ""
     echo "usage:"
     echo "    socker <command> [options]"
     echo ""
